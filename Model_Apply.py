@@ -7,6 +7,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
+import PIL
+from PIL import Image
+from resizeimage import resizeimage
 
 from fastai.vision import *
 from fastai.callbacks import *
@@ -19,11 +22,11 @@ class ModelApply:
 
 
     def __init__(self):
-        self.imagedir = '(insert path)'
-        self.outdir = '(insert path)'
-        self.testPath = os.path.join(self.imagedir, 'test_val_pt')
-        self.clin_val ='(insert path)/tumor_level_validation.csv'
-        self.save_dir='(insert path)'
+        self.imagedir = '/home/tom/Desktop/revision_analysis2/model_dev_indvPIRADS'
+        self.outdir = '/home/tom/Desktop/revision_analysis2/output'
+        self.testPath = os.path.join(self.imagedir, 'val_test_pt') #need to make new directory with all validation and test samples
+        self.clin_val ='/home/tom/Desktop/revision_analysis2/annotation'
+        self.save_dir= os.path.join(self.outdir,'eval_model')
         self.device=0
 
 
@@ -32,6 +35,25 @@ class ModelApply:
         final_filename = os.path.join(self.outdir, 'exported_models', 'export.pkl')
         shutil.copy2(initial_filename, final_filename)
 
+    def assign_val_test(self):
+        '''assigns 'test' or 'val' based on file structure to file called 'tumor_level_annoation' and re-assigns to name 'clinical validation' '''
+
+        data=pd.read_csv(os.path.join(self.clin_val,'tumor_level_annotation.csv'))
+        test_data=os.listdir(os.path.join(self.imagedir,'test'))
+        val_data=os.listdir(os.path.join(self.imagedir,'val_pt'))
+
+        include=0
+        for name in data['tumor_name'].tolist():
+            if name in test_data:
+                include+=1
+                data.loc[data['tumor_name']==name,'val_test']='test'
+            if name in val_data:
+                include+=1
+                data.loc[data['tumor_name']==name,'val_test']='val'
+
+
+        data_u=data.dropna(subset=['val_test'])
+        data_u.to_csv(os.path.join(self.clin_val,'clinical_validation.csv'))
 
     def apply_test_vote(self):
         torch.cuda.set_device(self.device)
@@ -45,38 +67,29 @@ class ModelApply:
         #import model
         model_path = os.path.join(self.outdir, 'exported_models')
         learn = load_learner(model_path)
+        print("learner loaded")
         test_path = self.testPath
 
         #import clinical data
-        tumor_val_db=pd.read_csv(self.clin_val)
-
-
+        tumor_val_db=pd.read_csv(os.path.join(self.clin_val,'clinical_validation.csv'))
         df_out = pd.DataFrame()
 
+        print('making predictions')
         for tumor in os.listdir(os.path.join(test_path)):
-            print(tumor)
-
             sum_pred = np.zeros(4)
             square_pred = np.zeros(4)
             img_num = 0
 
             for image in sorted(os.listdir(os.path.join(test_path, tumor))):
-                img = open_image(os.path.join(test_path, tumor, image))
+                img = open_image(os.path.join(test_path, tumor, image),resize=False)
                 pred_class, pred_idx, outputs = learn.predict(img)
-                print(outputs.numpy())
                 sum_pred += outputs.numpy()
                 square_pred += (outputs.numpy()) ** 2
                 img_num += 1
 
             # metrics
             average = sum_pred / img_num
-            sum_pred_class = np.argmax(sum_pred)
             ave_pred_class = np.argmax(average)
-            square_pred_class = np.argmax(square_pred)
-
-            print('sum prediction {}'.format(sum_pred))
-            print('average prediction {}'.format(average))
-            print('square prediction {}'.format(square_pred))
 
             # make prediction change this part to change the method of classification
             pred_PIRADS = str(ave_pred_class + 2)
@@ -88,6 +101,7 @@ class ModelApply:
 
         tumor_val_db.to_csv(os.path.join(self.save_dir,'tumor_val_db.csv'))
 
+
     def PIRADS_mapping(self,preprocess=False,col='gt_PIRADS'):
         '''figure out how well PIRADS maps to outcome'''
 
@@ -97,6 +111,7 @@ class ModelApply:
         db=pd.read_csv(os.path.join(self.save_dir,'tumor_val_db.csv'))
         db_bx=db.loc[db.loc[:,'biopsy']==1]
         total_tumors=db_bx.shape[0]
+        print("total tumors {}".format(total_tumors))
 
         for score in [2,3,4,5]:
             print(score)
@@ -149,7 +164,7 @@ class ModelApply:
 
 
 
-    def PIRADS_agreement(self,preprocess=False,db_train_test=False,db_val='test',col='gt_PIRADS'):
+    def PIRADS_agreement(self,preprocess=True,db_train_test=True,db_val='test',col='gt_PIRADS'):
         '''figure out how well PIRADS maps to outcome'''
 
         if preprocess==True:
@@ -166,7 +181,8 @@ class ModelApply:
 
         total_tumors = db.shape[0]
 
-
+        total_agreement=0
+        total_within_1=0
         for score in [2,3,4,5]:
             print(score)
             agreement=0
@@ -194,7 +210,8 @@ class ModelApply:
                     agreement+=1
                 if abs(gt_PIRADS-pred_PIRADS)<2:
                     within_1+=1
-
+            total_agreement+=agreement
+            total_within_1+=within_1
 
             print("agreement in {} of {}".format(agreement,total_t_P))
             print("agreement rate is {}".format(round(agreement/total_t_P*100,2)))
@@ -202,13 +219,15 @@ class ModelApply:
             print("within 1 rate is {}".format(round(within_1/total_t_P*100,2)))
             print("------------")
         print("total tumors {}".format(total_tumors))
-
+        print("total agreement {}".format(total_agreement))
+        print("total agreement rate is {}".format(round(total_agreement/total_tumors*100,2)))
+        print("within 1 agreement {}".format(total_within_1))
+        print("total within 1 agreement is {}".format(round(total_within_1/total_tumors*100,2)))
 
 
 
 if __name__ == '__main__':
     c = ModelApply()
-    c.convert_model_to_export(model_name='train_07052019-2057.pkl')
-    c.PIRADS_agreement()
-
-    #best model= 'train_07052019-2057.pkl'
+    c.convert_model_to_export(model_name='model_name.pkl')
+    #c.PIRADS_agreement()
+    #c.PIRADS_mapping(preprocess=False, col='pred_PIRADS')
