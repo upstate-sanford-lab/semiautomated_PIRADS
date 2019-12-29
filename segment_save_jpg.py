@@ -9,26 +9,27 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import StandardScaler
 import imageio
 import scipy.misc
+import statistics
+
+from parsing_VOI import ParseVOI
 
 #author @t_sanf
 
-#from Align import Align
-from parsing_VOI import ParseVOI
-
 
 class SegmentAligned(ParseVOI):
+    '''function to save bounding box around tumor segmentations as .jpeg images'''
 
     def __init__(self):
-        self.basePATH = r'(insert path)'
-        self.databases=['surgery_cases','prostateX','consecutive']
+        self.basePATH = r''  #path to root directory with databases of aligned files
+        self.databases=['']               #databases of aligned files
 
-        self.save=r'(insert path)'
-        self.save_tumors=r'(insert path)'
+        self.save=os.path.join(self.basePATH,'revision_analysis')  #empty directory for saving
+        self.save_tumors=os.path.join(self.save,'tumors_by_annotator')                             #
 
 
     def segment_aligned_by_annotator(self,initials='bt'):
         '''
-        creates bounding boxes based on segmentation in each image and saves as .jpg.
+        creates bounding boxes based on segmentation in each image and saves as .jpg for specified annotator
         ***note, need to delete the files in 'tumors by annotator' if you updated your dataset
         **note2 --> need to update development database if more tumors were annotated
         :return:
@@ -37,95 +38,95 @@ class SegmentAligned(ParseVOI):
         self.find_tumors_by_annotator(initials='bt') #runs code and saves to disk to save time, need to delete file if want to update
         processed_files=pd.read_csv(os.path.join(self.save_tumors,initials+'_annotated_tumor_paths.csv'))
         processed_files=processed_files['filepaths'].tolist()
-        print(len(processed_files))
-        print(processed_files)
 
         #need to check if files already segmented
-        files_already_done=os.listdir(os.path.join(self.save,'save_raw'))
+        if not os.path.exists(os.path.join(self.save,'jpg')):
+            os.mkdir(os.path.join(self.save,'jpg'))
+        files_already_done=os.listdir(os.path.join(self.save,'jpg'))
         print("total of {} files already segmented".format(len(files_already_done)))
         files_to_segment=[]
         for file in processed_files:
-            print(file)
             if str(file) not in files_already_done:
                 files_to_segment+=[file]
         print("total of {} files to segment".format(len(files_to_segment)))
 
         fails=[]
-        segmentation_fails=[]
         for file in files_to_segment:
+            #try:
+            patient_dir=file.split("\\")[-3]
+            database=file.split("\\")[-4]
+            print(database)
+            print("starting segmentation for patient {}".format(patient_dir))
+            self.segment_aligned(database=database,patient_dir=patient_dir,voi_path=file)
 
-            try:
-                patient_dir=file.split("\\")[-3]
-                database=file.split("\\")[-4]
-                print(database)
-                print("starting segmentation for patient {}".format(patient_dir))
-                self.segment_aligned(database=database,patient_dir=patient_dir,voi_path=file)
-
-            except:
-                fails+=[patient_dir]
-                print("patient_dir failed {}".format(file.split("\\")[-3]))
-
+            #except:
+            #    fails+=[patient_dir]
+            #    print("patient_dir failed {}".format(file.split("\\")[-3]))
         print(fails)
-        #segmentation_fails=pd.Series(segmentation_fails)
-        #segmentation_fails.to_csv(os.path.join(self.failPATH,'segmentation_fails.csv'))
 
-
-    def segment_aligned(self,database,patient_dir,voi_path):
+    def segment_aligned(self,database,patient_dir,voi_path,jpg=True):
         '''
         for files that are already aligned, this looks up dicom paths, voi paths, and segments all the images,
         then saves the T2 and the combination of 3 separately
-        :param patient_dir --> output of completed_files
+        :param database(path) --> the base directory with datasets in separtae folders
+        :param patient_dir(path) --> the specific directory of each patient
+        :param  voi_path(path) --> the path to voi files
+        :param jpg (bool) --> save as jpg if True, as npy if False
         :return: all segmented files
         '''
 
         dicom_paths=self.dicom_paths(database,patient_dir)
-        print(dicom_paths)
         bboxes = self.BBox_from_position(voi_path)
 
         #start by iterating over bounding boxes
         index = 0
-        for bbox in bboxes.keys():
-            vals=bboxes[bbox] #select values for each bounding box
-            print("vals are {}".format(vals))
 
-            #for each bounding box, select the appropriate slice and segment
-            segmented_image_dict={}
-            for series in dicom_paths:
-                paths=dicom_paths[series]
-                path_to_load=paths[int(bbox)]
-                segmented_image=self.segment_image(path_to_load,vals,patient_dir,index,series)
-                segmented_image_dict[series]=segmented_image
+        if not bboxes==None:
+            for bbox in bboxes.keys():
+                vals=bboxes[bbox] #select values for each bounding box
+                print("vals are {}".format(vals))
 
-            #extract each sequance array and combine into numpy array
-            t2=segmented_image_dict['t2']; adc=segmented_image_dict['adc']; highb=segmented_image_dict['highb']
-            stacked_image=np.dstack((t2,adc,highb))
+                #for each bounding box, select the appropriate slice and segment
+                segmented_image_dict={}
+                ave_sd_dict={}
+                for series in dicom_paths:
+                    paths=dicom_paths[series]
+                    path_to_load=paths[int(bbox)]
+                    segmented_image=self.segment_image(path_to_load,vals,patient_dir,index,series)
+                    ave_sd_dict[series]= self.average_of_series(paths)  # returns tuple of average,sd
+                    segmented_image_dict[series]=segmented_image
 
-            #normalize --> note, data is normalized based on slice level
-            stacked_image[:,:,0]=self.rescale_array(stacked_image[:,:,0])
-            stacked_image[:, :, 1] = self.rescale_array(stacked_image[:, :, 1])
-            stacked_image[:, :, 2] = self.rescale_array(stacked_image[:, :, 2])
+                #extract each sequance array and combine into numpy array
+                t2=segmented_image_dict['t2']; adc=segmented_image_dict['adc']; highb=segmented_image_dict['highb']
+                stacked_image=np.dstack((t2,adc,highb))
 
-            #make a directory if one doesn't already exist and save npy files to it
-            if not os.path.exists(os.path.join(self.save,'numpy', patient_dir)):
-                os.mkdir(os.path.join(self.save,'numpy', patient_dir))
-            os.chdir(os.path.join(self.save,'numpy', patient_dir))
+                #normalize --> note, data is normalized on patient level
+                stacked_image[:,:,0]=self.rescale_array(stacked_image[:,:,0],ave_sd_dict['t2'][0],ave_sd_dict['t2'][1])
+                stacked_image[:, :, 1] = self.rescale_array(stacked_image[:, :, 1],ave_sd_dict['adc'][0],ave_sd_dict['t2'][1])
+                stacked_image[:, :, 2] = self.rescale_array(stacked_image[:, :, 2],ave_sd_dict['highb'][0],ave_sd_dict['t2'][1])
 
-            np.save(patient_dir + '_' + str(index) + '_' + vals[0] + '.npy',stacked_image)
+                #make a directory if one doesn't already exist for images, conver to Image and save .jpg
+                if not os.path.exists(os.path.join(self.save, 'jpg')):
+                    os.mkdir(os.path.join(self.save,'jpg'))
 
-            #make a directory if one doesn't already exist for images, conver to Image and save .jpg
-            if not os.path.exists(os.path.join(self.save,'jpg', patient_dir)):
-                os.mkdir(os.path.join(self.save,'jpg', patient_dir))
-            os.chdir(os.path.join(self.save,'jpg', patient_dir))
+                if not os.path.exists(os.path.join(self.save,'jpg', patient_dir)):
+                    os.mkdir(os.path.join(self.save,'jpg', patient_dir))
+                os.chdir(os.path.join(self.save,'jpg', patient_dir))
 
-            #opencv solution
-            cv2.imwrite(patient_dir + '_' + str(index) + '_' + vals[0] + '.jpg',stacked_image)
+                #opencv solution
+                if jpg==True:
+                    cv2.imwrite(patient_dir + '_' + str(index) + '_' + vals[0] + '.jpg',stacked_image)
 
-            index+=1
+                elif jpg==False: #save as numpy arrays
+                    np.save(patient_dir + '_' + str(index) + '_' + vals[0] + '.npy',stacked_image)
+
+                index+=1
 
     def dicom_paths(self, database,patient_dir):
         '''
         start in patient directory, then find all dicom files listed in that directory -->  note adc and highb
         are aligned to t2
+        :param database (path): the base director of all patients
         :param patient_dir (str): the folder name of the files
         :return: list of paths to dicom files within patient directory
         '''
@@ -191,7 +192,6 @@ class SegmentAligned(ParseVOI):
         '''
         ds = pydicom.dcmread(path_to_image)
         data = ds.pixel_array
-        data=self.rescale_array(data)  #normalize by slice
 
         print('The image has {} x {} voxels'.format(data.shape[0],data.shape[1]))
         data_downsampled = data[vals[2] - pad:vals[4] + pad, vals[1] - pad:vals[3] + pad]
@@ -201,6 +201,8 @@ class SegmentAligned(ParseVOI):
         ds.PixelData = data_downsampled.tobytes()
         ds.Rows, ds.Columns = data_downsampled.shape
 
+        if not os.path.exists(os.path.join(self.save,'T2')):
+            os.mkdir(os.path.join(self.save,'T2'))
         if not os.path.exists(os.path.join(self.save,'T2', patient_dir)):
             os.mkdir(os.path.join(self.save,'T2', patient_dir))
         os.chdir(os.path.join(self.save,'T2',patient_dir))
@@ -245,47 +247,23 @@ class SegmentAligned(ParseVOI):
         return(aligned_files)
 
 
-    def check_empty_files(self):
+    def rescale_array(self,array,series_ave,series_sd):
+        '''normalize array on series level
+        :param array (numpy array) - raw array matrix
+        :param series_ave: average across entire series
+        :param series_sd: standard deviation of entire array
+
         '''
-        check for file completion in robtos_only and return only completed files with 'PIRADS' in voi file
-        :return: list of patient names
-        '''
+        #normalize by series average and sd average (across entire image)
+        series_ave=np.float(series_ave)
+        normalized_array=(array-series_ave)/series_sd # using broadcasting
 
-        path = self.basePATH
-        files = os.listdir(path)
-        print("searching total of {} files in robots_only folder to see which ones are complete".format(len(files)))
-        completed=[]
-        for file in files:
-            if len(file.split('_')) == 2:
-                voi_dir = os.path.join(path, file, 'voi')
-                adc_dir = os.path.join(path, file, r'dicoms\adc')
-                highb_dir = os.path.join(path, file, r'dicoms\highb')
-                t2_dir = os.path.join(path, file, r'dicoms\t2')
-
-                voi_files = os.listdir(voi_dir)
-                adc_files = os.listdir(adc_dir)
-                highb_files = os.listdir(highb_dir)
-                t2_files = os.listdir(t2_dir)
-
-                #check for 'PIRADS' in voi files
-                pirads_files=[]
-                for file_voi in voi_files:
-                    split_file = file_voi.replace(' ', '_').split('_')
-                    if 'PIRADS' in split_file:
-                        pirads_files+=[file_voi]
-
-                if len(voi_files) > 0 and len(pirads_files)>0 and len(adc_files) > 1 and len(highb_files) > 1 and len(t2_files) > 1:
-                    completed += [file]
-
-        print('total of {} complete files with "PIRADS" in VOI file '.format(len(completed)))
-        return(completed)
-
-
-    def rescale_array(self,array):
+        # minmax scaling --> for viewing
         scaler=MinMaxScaler(feature_range=(0,255))
-        scaler=scaler.fit(array)
-        X_scaled=scaler.transform(array)
-        return (X_scaled)
+        scaler=scaler.fit(normalized_array)
+        normalized_array=scaler.transform(normalized_array)
+
+        return (normalized_array)
 
 
     def find_tumors_by_annotator(self,initials='bt'):
@@ -295,6 +273,8 @@ class SegmentAligned(ParseVOI):
         initials=initials of person doing annotation.  Should be terminal part
         '''
 
+        if not os.path.exists(os.path.join(self.save_tumors)):
+            os.mkdir(self.save_tumors)
         if not os.path.exists(os.path.join(self.save_tumors,initials+'_annotated_tumor_paths.csv')):
 
             filepaths=[]
@@ -308,18 +288,16 @@ class SegmentAligned(ParseVOI):
                         if len(split_file)>5 and split_file[-1]==initials+'.voi':
                             filepaths+=[os.path.join(self.basePATH,database,patient_dir,'voi',file)]
                             counter+=1
-                            print(counter)
+                            print('found total of {} tumor circled by annotator {}'.format(counter,initials))
 
             filepaths_df=pd.DataFrame({'filepaths':filepaths})
             print('total of {} tumors for annotator {}'.format(len(filepaths),initials))
             filepaths_df.to_csv(os.path.join(self.save_tumors,initials+'_annotated_tumor_paths.csv'))
 
-
     def find_total_annotations(self,initials='bt'):
         '''parses through all databases and returns list of paths with tumors annotated by initials of annotator (saved
         after terminal underscore), then saves path to these .voi files
-        note - if you want to update the databse, delete the file and re-run
-        initials=initials of person doing annotation.  Should be terminal part
+        initials=initials of person doing annotation, stored after terminal underscore of file
         '''
 
         filepaths=[]
@@ -339,7 +317,19 @@ class SegmentAligned(ParseVOI):
             print('total of {} tumors for annotator {}'.format(len(filepaths),initials))
             filepaths_df.to_csv(os.path.join(self.save_tumors,initials+'_annotated_tumor_paths.csv'))
 
+    def average_of_series(self,paths=["C:\\Users\\sanfordt\\Desktop\\PIRADS_dataset\\consecutive\\1455382_20180514\\dicoms\\t2\\I1000002"]):
+        '''helper function that calculates all the average across all elements in a series'''
+        slice_num=0
+        array_1 = pydicom.dcmread(paths[0]).pixel_array #gets the shape of the first array in the series
+        array=np.zeros(shape=(array_1.shape[0],array_1.shape[1],len(paths)))
 
+        #start by contructing multidimensional array from individual dicom slices
+        for path in paths:
+            pixel_data=pydicom.dcmread(path).pixel_array
+            array[:,:,slice_num]=pixel_data
+            slice_num = slice_num + 1
+        mean_slices=(np.mean(array), np.std(array))
+        return mean_slices
 
 
 ###############visualization tools##################
