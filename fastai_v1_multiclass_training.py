@@ -1,50 +1,53 @@
-import os
 import sys
 import datetime
+import argparse
 
-import fastai.vision as faiv
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
+import torch.nn.functional as F
 
+from fastai.vision.data import *
 from fastai.vision import *
 from fastai.callbacks import *
 from fastai.callbacks.tracker import *
 from fastai.basic_train import *
 
-#authors @t_sanf @drsharmon
+# @t_sanf @DrSHarmon
 
-class MultiClassProstate:
+class VisionMulticlass:
+    '''class to save hyperparameters while training models using fastai library functionality'''
 
     def __init__(self):
-        self.imagedir='(insert path)'
-        self.outdir='(insert path)'
+        self.imagedir=''
+        self.outdir=''
         self.testPath=os.path.join(self.imagedir,'test')
-        self.model_name='train'
+        self.model_name='bot2'
         self.tr_name='train'
         self.val_name='val'
-        self.resnet='resnet50'
-        self.img_sz=224
-        self.lr=0.00001
-        self.lr_range=slice(1e-7, 1e-4)
-        self.bs=64 #batch size
-        self.device=0 #which gpu
-        self.dc_e=100 #last layers epochs
-        self.all_e=20 #all epochs
-        self.lighting=0.1
+        self.arch='resnet34'
+        self.img_sz=80
+        self.lr=0.005
+        self.lr_range=slice(1e-11, 1e-5)
+        self.bs=128
+        self.device=0
+        self.dc_e=20
+        self.all_e=1000 #all epochs
+        self.lighting=0.05
         self.rotate=45
+        self.weightedloss=False
         self.early_stopping=True
-        self.unfreeze=False
-        self.weights = [10.,4.,2.,1.]
+        self.unfreeze=True
+        self.weights = [10,5,2.5,1]
         self.model_dict={'resnet18':[models.resnet18],'resnet34':[models.resnet34],'resnet50':[models.resnet50],
-            'resnet101':[models.resnet101],'resnet152':[models.resnet152]}
-
+            'resnet101':[models.resnet101],'resnet152':[models.resnet152],'vgg16_bn':[models.vgg16_bn],'densenet161':[models.densenet161]}
 
         #retraining
         self.retrain=False
-        self.retraindir = '(insert path)'
-        self.save_model_name='(insert name)'
+        self.retraindir = '/data/Stephanie_Harmon/bladder_path/all_pts/classification_042519/All_Others/10x/training_log'
+        self.save_model_name='10x_fullset_fortytwo_final_layers_tuned_04302019-0824'
 
     def load_jpg_from_folder(self):
         '''
@@ -53,13 +56,8 @@ class MultiClassProstate:
         :return: databunch
         '''
 
-        #tfms =([*rand_pad(padding=3, size=self.img_sz, mode='zeros')], [])
-        # tfms = get_transforms(flip_vert=True, max_lighting=0.1, max_zoom=1.05, max_warp=0.)
-        #tfms = get_transforms(flip_vert=True, max_rotate=self.rotate, max_lighting = self.lighting, max_zoom=1.05, zoom_crop(scale=(0.75,2), do_rand=True, p=1.0))
-        #extralist = [*rand_resize_crop(size=224, max_scale=1.5)]
-        #extralist = [crop_pad(size=448,row_pct=0.5,col_pct=0.5),]
-        #tfms = get_transforms(flip_vert=True,max_rotate=45,max_warp=0.1,max_lighting = 0.3,p_lighting=0.75,p_affine=0.5)#, xtra_tfms=extralist)
-        tfms = get_transforms(flip_vert=True, max_rotate=45, max_warp=0.1, max_lighting=0.1, p_lighting=0.5,p_affine=0.5)
+
+        tfms = get_transforms(flip_vert=True,max_rotate=self.rotate,max_warp=0.05,max_lighting = self.lighting,p_lighting=0.9,p_affine=0.5)
 
         data = (ImageList.from_folder(self.imagedir)
                 .split_by_folder(train=self.tr_name, valid=self.val_name)
@@ -68,7 +66,6 @@ class MultiClassProstate:
                 .databunch(bs=self.bs)
                 .normalize())
         return data
-
 
     def train(self):
         '''
@@ -84,26 +81,18 @@ class MultiClassProstate:
         print('data loaded')
         print('classes in this dataset are {}'.format(data.classes))
 
-        #train loop
+
         w = torch.cuda.FloatTensor(self.weights)
-        if self.early_stopping==True:
-            learn = cnn_learner(data, self.model_dict[self.resnet][0],
+        learn = cnn_learner(data, self.model_dict[self.arch][0],
                             metrics=[error_rate],
                             callback_fns=[ShowGraph,
-                                          partial(SaveModelCallback, monitor='val_loss', mode='auto', name=self.tr_name),
-                                          partial(EarlyStoppingCallback, monitor='val_loss', min_delta=0.001, patience=200)],
+                                          partial(SaveModelCallback, monitor='valid_loss', mode='auto',name=self.model_name),
+                                          partial(EarlyStoppingCallback, monitor='valid_loss', min_delta=0.001,patience=100)],
                             wd=0.1,
-                            loss_func=torch.nn.CrossEntropyLoss(weight=w))
-
-        else:
-            learn = cnn_learner(data, self.model_dict[self.resnet][0],
-                            metrics=[error_rate],
-                            wd=0.1,
-                            loss_func=torch.nn.CrossEntropyLoss(weight=w))
-
+                            loss_func=LabelSmoothingCrossEntropy()).mixup()
 
         self.trainblock(learner=learn)
-        save_name = self.model_name + "_" + str(datetime.datetime.now().strftime("%m%d%Y-%H%M"))
+        save_name = self.model_name + "_" + str(datetime.datetime.now().strftime("%m%d%Y-%H%M")) + '.pkl'
 
         #save figures
         self.save_figures(learner=learn)
@@ -112,7 +101,6 @@ class MultiClassProstate:
         self.save_hyperparameters(filename='hyperparameters')
 
         return save_name
-
 
 ####################
 # helper functions #
@@ -144,12 +132,12 @@ class MultiClassProstate:
     def save_figures(self,learner):
         interp = ClassificationInterpretation.from_learner(learner)
         losses, idxs = interp.top_losses()
-        interp.plot_confusion_matrix(figsize=(12, 12), dpi=60)
+        interp.plot_confusion_matrix(figsize=(12, 12),dpi=60)
         plt.savefig(os.path.join(self.outdir, 'confusion_matrix',
-                                 self.model_name + '_' + str(datetime.datetime.now().strftime("%m%d%Y-%H%M")+'.jpg')))
+                                 self.model_name + '_' + str(datetime.datetime.now().strftime("%m%d%Y-%H%M"))))
         interp.plot_top_losses(9, figsize=(15, 11))
         plt.savefig(os.path.join(self.outdir, 'top_loss',
-                                 self.model_name + '_' + str(datetime.datetime.now().strftime("%m%d%Y-%H%M")+'.jpg')))
+                                 self.model_name + '_' + str(datetime.datetime.now().strftime("%m%d%Y-%H%M"))))
 
     def save_hyperparameters(self,filename='hyperparameters'):
         file = open(
@@ -159,7 +147,7 @@ class MultiClassProstate:
         file.write(
             'hyper-parameters for model at {} \n'.format(
                 str(datetime.datetime.now().strftime("%m%d%Y-%H%M"))))
-        file.write('Resnet type is: {} \n'.format(self.model_dict[self.resnet][0]))
+        file.write('Resnet type is: {} \n'.format(self.model_dict[self.arch][0]))
         file.write('model name is: {} \n'.format(self.model_name))
         print('model name is: {} \n'.format(self.model_name))
         file.write('training name is: {} \n'.format(self.tr_name))
@@ -175,6 +163,7 @@ class MultiClassProstate:
         file.write('number epochs densely connnected: {} \n'.format(self.dc_e))
         file.write('number epochs all layers: {} \n'.format(self.all_e))
         file.write('unfreeze?: {} \n'.format(str(self.unfreeze)))
+        file.write('weighting: {} \n'.format(str(self.weightedloss)))
         file.write('weighting: {} \n'.format(str(self.weights)))
         file.close()
 
@@ -197,183 +186,46 @@ class MultiClassProstate:
         if not os.path.isdir(os.path.join(self.outdir, 'exported_models')):
             os.mkdir(os.path.join(self.outdir, 'exported_models'))
 
-    ####################
-    ## Apply Functions##
-    ####################
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, logits=False, reduction='elementwise_mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.logits = logits
+        self.reduction = reduction
 
-    def convert_model_to_export(self, model_name):
-        initial_filename = os.path.join(self.outdir, 'exported_models', model_name)
-        final_filename = os.path.join(self.outdir, 'exported_models', 'export.pkl')
-        shutil.copy2(initial_filename, final_filename)
+    def forward(self, inputs, targets):
+        if self.logits:
+            BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        else:
+            BCE_loss = F.binary_cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
 
-    def apply_test_vote_binary(self):
-        torch.cuda.set_device(self.device)
-
-        # set up the output directory
-        if not os.path.isdir(self.outdir):
-            os.mkdir(self.outdir)
-        if not os.path.isdir(os.path.join(self.outdir, 'val_results')):
-            os.mkdir(os.path.join(self.outdir, 'val_results'))
-
-        model_path = os.path.join(self.outdir, 'exported_models')
-        learn = load_learner(model_path)
-        test_path = self.testPath
-
-        total_patients = 0
-        correct = 0
-        gt_dict = {'2': 0, '3_4_5': 0}
-        correct_dict = {'2': 0, '3_4_5': 0}
-
-        df_out = pd.DataFrame()
-        for patient in os.listdir(os.path.join(test_path)):
-            print(patient)
-            print('patient')
-            total_patients += 1
-
-            sum_pred = np.zeros(4)
-            square_pred = np.zeros(4)
-            img_num = 0
-
-            for image in sorted(os.listdir(os.path.join(test_path, patient))):
-                img = open_image(os.path.join(test_path, patient, image))
-                pred_class, pred_idx, outputs = learn.predict(img)
-                print(outputs.numpy())
-                sum_pred += outputs.numpy()
-                square_pred += (outputs.numpy()) ** 2
-                img_num += 1
-
-            # metrics
-            average = sum_pred / img_num
-            sum_pred_class = np.argmax(sum_pred)
-            ave_pred_class = np.argmax(average)
-            square_pred_class = np.argmax(square_pred)
-
-            print('sum prediction {}'.format(sum_pred))
-            print('average prediction {}'.format(average))
-            print('square prediction {}'.format(square_pred))
-
-            # change this part to change the method of classification
-            pred_PIRADS = str(ave_pred_class + 2)
-
-            # check if prediction agrees with the ground truth
-            gt = image.split('_')[8]
-
-            print('Predicted PIRADS is {}'.format(pred_PIRADS))
-            print('Ground Truth PIRADS is {}'.format(gt))
-            gt_dict[str(gt)] += 1
-            if pred_PIRADS == gt:
-                print("correct")
-                correct += 1
-                correct_dict[str(gt)] += 1
-
-            if pred_PIRADS != gt:
-                print("incorrect")
-                t_df = pd.DataFrame([image, pred_PIRADS, gt]).transpose()
-                df_out = pd.concat([df_out, t_df], axis=0)
-
-        print("------------------------------")
-        print("total patients {}".format(total_patients))
-        print("total correct {}".format(correct))
-        print("percent_correct {}".format(correct / total_patients))
-        print(gt_dict)
-        print(correct_dict)
-        for i in range(2, 5):
-            print('percent correct for PIRADS {} is {}'.format(i, correct[str(i)] / gt_dict[str(i)]))
-
-        # write dataframe out to csv
-        df_out.columns = ['img_name', 'class_pred', 'ground truth', ]
-        df_out.to_csv(os.path.join(self.outdir, 'val_results', 'val_results_by_img' + '_' + self.model_name + '_' + str(
-            datetime.datetime.now().strftime("%m%d%Y-%H%M")) + '.csv'))
+        if self.reduction is None:
+            return F_loss
+        else:
+            return torch.mean(F_loss)
 
 
-    def apply_test_vote_multiclass(self):
-        '''
-        applies model on patient level
-        '''
+class LabelSmoothingCrossEntropy(nn.Module):
+    def __init__(self, ε: float = 0.1, reduction='mean'):
+        super().__init__()
+        self.ε, self.reduction = ε, reduction
 
-        torch.cuda.set_device(self.device)
+    def lin_comb(self,v1, v2, beta): return beta*v1 + (1-beta)*v2
 
-        # set up the output directory
-        if not os.path.isdir(self.outdir):
-            os.mkdir(self.outdir)
-        if not os.path.isdir(os.path.join(self.outdir, 'val_results')):
-            os.mkdir(os.path.join(self.outdir, 'val_results'))
+    def reduce_loss(self,loss, reduction='mean'):
+        return loss.mean() if reduction == 'mean' else loss.sum() if reduction == 'sum' else loss
 
-        model_path = os.path.join(self.outdir, 'exported_models')
-        learn = load_learner(model_path)
-        test_path = self.testPath
-
-        total_patients = 0
-        correct = 0
-        gt_dict={'2':0,'3':0,'4':0,'5':0}
-        correct_dict={'2':0,'3':0,'4':0,'5':0}
-
-        df_out = pd.DataFrame()
-        for patient in os.listdir(os.path.join(test_path)):
-            print(patient)
-            print('patient')
-            total_patients+=1
-
-            sum_pred=np.zeros(4)
-            square_pred=np.zeros(4)
-            img_num=0
-
-            for image in sorted(os.listdir(os.path.join(test_path, patient))):
-                img = open_image(os.path.join(test_path, patient, image))
-                pred_class, pred_idx, outputs = learn.predict(img)
-                print(outputs.numpy())
-                sum_pred+=outputs.numpy()
-                square_pred+=(outputs.numpy())**2
-                img_num+=1
-
-            #metrics
-            average=sum_pred/img_num
-            sum_pred_class=np.argmax(sum_pred)
-            ave_pred_class=np.argmax(average)
-            square_pred_class=np.argmax(square_pred)
-
-            print('sum prediction {}'.format(sum_pred))
-            print('average prediction {}'.format(average))
-            print('square prediction {}'.format(square_pred))
-
-            #change this part to change the method of classification
-            pred_PIRADS=str(ave_pred_class+2)
-
-            #check if prediction agrees with the ground truth
-            gt=image.split('_')[8]
-
-            print('Predicted PIRADS is {}'.format(pred_PIRADS))
-            print('Ground Truth PIRADS is {}'.format(gt))
-            gt_dict[str(gt)]+=1
-            if pred_PIRADS==gt:
-                print("correct")
-                correct+=1
-                correct_dict[str(gt)]+=1
-
-            if pred_PIRADS!=gt:
-                print("incorrect")
-                t_df = pd.DataFrame([image, pred_PIRADS, gt]).transpose()
-                df_out = pd.concat([df_out, t_df], axis=0)
-
-        print("------------------------------")
-        print("total patients {}".format(total_patients))
-        print("total correct {}".format(correct))
-        print("percent_correct {}".format(correct/total_patients))
-        print(gt_dict)
-        print(correct_dict)
-        for i in range(2,5):
-            print('percent correct for PIRADS {} is {}'.format(i,correct[str(i)]/gt_dict[str(i)]))
-
-
-        # write dataframe out to csv
-        df_out.columns = ['img_name', 'class_pred', 'ground truth', ]
-        df_out.to_csv(os.path.join(self.outdir, 'val_results', 'val_results_by_img' + '_' + self.model_name + '_' + str(
-            datetime.datetime.now().strftime("%m%d%Y-%H%M")) + '.csv'))
-
+    def forward(self, output, target):
+        c = output.size()[-1]
+        log_preds = F.log_softmax(output, dim=-1)
+        loss = self.reduce_loss(-log_preds.sum(dim=-1), self.reduction)
+        nll = F.nll_loss(log_preds, target, reduction=self.reduction)
+        return self.lin_comb(loss / c, nll, self.ε)
 
 
 if __name__ == '__main__':
-    c = MultiClassProstate()
+    c = VisionMulticlass()
     name = c.train()
-    c.convert_model_to_export(model_name=name)
-    c.apply_test_vote_multiclass()
